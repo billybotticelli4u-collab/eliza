@@ -52,9 +52,7 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 }
 
 /**
- * Candidate filenames for the fused library, per platform. Mirrors
- * `engine-bridge.ts::libraryFilenames` so every consumer resolves the same
- * artifact.
+ * Candidate filenames for the fused library, per platform.
  */
 function fusedLibraryFilenames(): string[] {
 	if (process.platform === "darwin") return ["libelizainference.dylib"];

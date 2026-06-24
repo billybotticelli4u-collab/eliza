@@ -85,7 +85,6 @@ export {
 	EngineVoiceBridge,
 	type EngineVoiceBridgeOptions,
 	encodeMonoPcm16Wav,
-	FfiOmniVoiceBackend,
 	StubOmniVoiceBackend,
 	type VoiceTurnEvents,
 } from "./engine-bridge";

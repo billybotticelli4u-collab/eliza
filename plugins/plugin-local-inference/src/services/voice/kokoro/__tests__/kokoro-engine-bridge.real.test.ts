@@ -110,7 +110,6 @@ describe.skipIf(!isBun || !LIB_PATH)(
 		it("constructs a KokoroTtsBackend against the real fused lib", () => {
 			const bridge = EngineVoiceBridge.start({
 				bundleRoot: "", // kokoroOnly skips the existsSync check
-				useFfiBackend: false,
 				kokoroOnly: makeKokoroConfig(tmp),
 				kokoroFfi: ffi,
 				lifecycleLoaders: lifecycleLoadersOk(),
@@ -124,7 +123,6 @@ describe.skipIf(!isBun || !LIB_PATH)(
 		it("uses the provided bundleRoot as working dir when it exists", () => {
 			const bridge = EngineVoiceBridge.start({
 				bundleRoot: tmp,
-				useFfiBackend: false,
 				kokoroOnly: makeKokoroConfig(tmp),
 				kokoroFfi: ffi,
 				lifecycleLoaders: lifecycleLoadersOk(),
@@ -136,7 +134,6 @@ describe.skipIf(!isBun || !LIB_PATH)(
 		it("arms with no-op lifecycle loaders by default (no real mmap regions)", async () => {
 			const bridge = EngineVoiceBridge.start({
 				bundleRoot: "",
-				useFfiBackend: false,
 				kokoroOnly: makeKokoroConfig(tmp),
 				kokoroFfi: ffi,
 			});
@@ -147,7 +144,6 @@ describe.skipIf(!isBun || !LIB_PATH)(
 		it("preserves the requested sample rate from the kokoroOnly layout", () => {
 			const bridge = EngineVoiceBridge.start({
 				bundleRoot: "",
-				useFfiBackend: false,
 				kokoroOnly: {
 					...makeKokoroConfig(tmp),
 					layout: { ...makeKokoroConfig(tmp).layout, sampleRate: 16_000 },

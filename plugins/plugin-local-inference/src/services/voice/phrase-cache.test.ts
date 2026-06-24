@@ -161,7 +161,6 @@ describe("EngineVoiceBridge phrase prewarm + first-audio filler", () => {
 	it("hasRealTtsBackend() is false for the silent backend", () => {
 		const bridge = EngineVoiceBridge.start({
 			bundleRoot,
-			useFfiBackend: false,
 		});
 		expect(bridge.backend).toBeInstanceOf(StubOmniVoiceBackend);
 		expect(bridge.hasRealTtsBackend()).toBe(false);
@@ -170,7 +169,6 @@ describe("EngineVoiceBridge phrase prewarm + first-audio filler", () => {
 	it("prewarmIdlePhrases() is a no-op without a real backend (never caches zeros)", async () => {
 		const bridge = EngineVoiceBridge.start({
 			bundleRoot,
-			useFfiBackend: false,
 			lifecycleLoaders: lifecycleLoadersOk(),
 		});
 		await bridge.arm();
@@ -181,7 +179,6 @@ describe("EngineVoiceBridge phrase prewarm + first-audio filler", () => {
 	it("playFirstAudioFiller() is a no-op without a real backend", async () => {
 		const bridge = EngineVoiceBridge.start({
 			bundleRoot,
-			useFfiBackend: false,
 			lifecycleLoaders: lifecycleLoadersOk(),
 		});
 		await bridge.arm();
@@ -192,7 +189,6 @@ describe("EngineVoiceBridge phrase prewarm + first-audio filler", () => {
 		const backend = new RecordingBackend();
 		const bridge = EngineVoiceBridge.start({
 			bundleRoot,
-			useFfiBackend: false,
 			backendOverride: backend,
 		});
 		// Not armed.
@@ -205,7 +201,6 @@ describe("EngineVoiceBridge phrase prewarm + first-audio filler", () => {
 		const backend = new RecordingBackend();
 		const bridge = EngineVoiceBridge.start({
 			bundleRoot,
-			useFfiBackend: false,
 			backendOverride: backend,
 			lifecycleLoaders: lifecycleLoadersOk(),
 		});
@@ -227,7 +222,6 @@ describe("EngineVoiceBridge phrase prewarm + first-audio filler", () => {
 		const backend = new RecordingBackend();
 		const bridge = EngineVoiceBridge.start({
 			bundleRoot,
-			useFfiBackend: false,
 			backendOverride: backend,
 			lifecycleLoaders: lifecycleLoadersOk(),
 		});

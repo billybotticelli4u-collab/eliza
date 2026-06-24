@@ -908,8 +908,8 @@ export class LocalInferenceEngine {
 	/**
 	 * Start the voice-streaming pipeline against an already-activated
 	 * Eliza-1 bundle. Per AGENTS.md §3, voice is mandatory for Eliza-1
-	 * tiers — every required artifact (speaker preset, fused FFI when
-	 * `useFfiBackend`, bundle root) is checked up front and missing
+	 * tiers — every required artifact (speaker preset, Kokoro artifacts on
+	 * the kokoroOnly path, bundle root) is checked up front and missing
 	 * pieces surface as `VoiceStartupError`. There is no silent fallback
 	 * to text-only, no log-and-continue.
 	 *
@@ -1037,7 +1037,6 @@ export class LocalInferenceEngine {
 				}
 				bridge = this.startVoice({
 					bundleRoot: "",
-					useFfiBackend: false,
 					kokoroOnly: kokoro,
 				});
 			} else {
@@ -1053,7 +1052,6 @@ export class LocalInferenceEngine {
 				}
 				bridge = this.startVoice({
 					bundleRoot: "",
-					useFfiBackend: false,
 					kokoroOnly: kokoro,
 				});
 			}
@@ -1171,7 +1169,7 @@ export class LocalInferenceEngine {
 		if (backendId === "stub") {
 			throw new VoiceStartupError(
 				"missing-fused-build",
-				"[voice] Cannot start a live voice session on the StubOmniVoiceBackend (it emits silence). Start the bridge with useFfiBackend:true or a real backendOverride.",
+				"[voice] Cannot start a live voice session on the StubOmniVoiceBackend (it emits silence). Start the bridge on the kokoroOnly path or with a real backendOverride.",
 			);
 		}
 
@@ -1500,7 +1498,7 @@ export class LocalInferenceEngine {
 		if ((bridge.backend as { id?: string }).id === "stub") {
 			throw new VoiceStartupError(
 				"missing-fused-build",
-				"[voice] Cannot synthesize speech with StubOmniVoiceBackend (it emits silence). Start voice with useFfiBackend:true or inject a real backend.",
+				"[voice] Cannot synthesize speech with StubOmniVoiceBackend (it emits silence). Start voice on the kokoroOnly path or inject a real backend.",
 			);
 		}
 		return bridge.synthesizeTextToWav(text, signal);

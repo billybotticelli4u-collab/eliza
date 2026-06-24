@@ -1,12 +1,10 @@
 /**
  * Kokoro-82M TTS backend.
  *
- * Implements the same `OmniVoiceBackend + StreamingTtsBackend` seam that
- * `FfiOmniVoiceBackend` (the OmniVoice path) satisfies, so a
+ * Implements the `OmniVoiceBackend + StreamingTtsBackend` seam (the same
+ * seam the retired fused OmniVoice TTS backend satisfied), so a
  * `VoiceScheduler` instance does not need to know which TTS family it is
- * driving. The runtime selection layer (`runtime-selection.ts`) picks
- * between this and `FfiOmniVoiceBackend` based on hardware tier and the
- * caller's first-audio-latency target.
+ * driving. Kokoro is now the only on-device TTS backend.
  *
  * The actual model inference is delegated to a `KokoroRuntime` instance
  * (GGUF / mock) — this class owns:

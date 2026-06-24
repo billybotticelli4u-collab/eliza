@@ -1,30 +1,20 @@
 /**
  * Tests for the streaming-TTS routing in `engine-bridge.ts`.
  *
- * Covers the `FfiOmniVoiceBackend` ↔ fused `libelizainference` seam W9's
- * scheduler drives:
- *   - when the loaded build advertises streaming TTS
- *     (`tts_stream_supported() == 1`), `synthesizeStream` forwards to
- *     `eliza_inference_tts_synthesize_stream` and the chunk callback runs
- *     per delivered PCM segment;
- *   - when it does NOT, `synthesizeStream` still satisfies the seam — but
- *     with exactly one body chunk + one `isFinal` tail (the batch
- *     forward-pass result), so callers never mistake a non-streaming
- *     build for a streaming one (no fallback sludge);
- *   - `synthesize` (whole-phrase) routes through the streaming entry when
- *     supported and concatenates the chunks;
- *   - `cancelSignal` flips end the stream at the next chunk boundary;
- *   - `StubOmniVoiceBackend` implements the same seam for scheduler tests.
+ * Covers:
+ *   - `nativeRejectedRangeToRollbackRange` half-open → inclusive conversion;
+ *   - `StubOmniVoiceBackend` implementing the streaming seam for scheduler
+ *     tests;
+ *   - the `EngineVoiceBridge` direct-synthesis guard + one-shot transcription
+ *     routing on the non-kokoroOnly (stub/override) path.
  */
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { fakeFfi } from "./__test-helpers__/fake-ffi";
 import {
 	EngineVoiceBridge,
-	FfiOmniVoiceBackend,
 	isStreamingTtsBackend,
 	nativeRejectedRangeToRollbackRange,
 	StubOmniVoiceBackend,
@@ -79,183 +69,6 @@ function lifecycleLoadersOk(): VoiceLifecycleLoaders {
 		loadVoiceSchedulerNodes: async () => refc,
 	};
 }
-
-describe("FfiOmniVoiceBackend — streaming TTS routing", () => {
-	it("synthesizeStream forwards to the streaming entry when the build supports it", async () => {
-		const backend = new FfiOmniVoiceBackend({
-			ffi: fakeFfi("ignored", { ttsSamples: 16, ttsStreamSupported: true }),
-			ctx: 1n,
-			sampleRate: 24_000,
-		});
-		expect(backend.supportsStreamingTts()).toBe(true);
-		const chunks: TtsPcmChunk[] = [];
-		const res = await backend.synthesizeStream({
-			phrase: phrase("hi there"),
-			preset: preset(),
-			cancelSignal: { cancelled: false },
-			onChunk: (c) => {
-				chunks.push({ ...c, pcm: new Float32Array(c.pcm) });
-			},
-		});
-		expect(res.cancelled).toBe(false);
-		// fakeFfi emits one body chunk (ttsSamples) + one final tail.
-		expect(chunks.map((c) => c.isFinal)).toEqual([false, true]);
-		expect(chunks[0]?.pcm.length).toBe(16);
-		expect(chunks[0]?.sampleRate).toBe(24_000);
-		expect(chunks[1]?.pcm.length).toBe(0);
-	});
-
-	it("synthesizeStream collapses to one body chunk + tail on a non-streaming build", async () => {
-		const backend = new FfiOmniVoiceBackend({
-			ffi: fakeFfi("ignored", { ttsSamples: 9, ttsStreamSupported: false }),
-			ctx: 1n,
-			sampleRate: 24_000,
-		});
-		expect(backend.supportsStreamingTts()).toBe(false);
-		const chunks: TtsPcmChunk[] = [];
-		const res = await backend.synthesizeStream({
-			phrase: phrase("hi"),
-			preset: preset(),
-			cancelSignal: { cancelled: false },
-			onChunk: (c) => {
-				chunks.push({ ...c, pcm: new Float32Array(c.pcm) });
-			},
-		});
-		expect(res.cancelled).toBe(false);
-		expect(chunks.map((c) => c.isFinal)).toEqual([false, true]);
-		// Batch path writes `ttsSamples` (= 9) into the caller buffer.
-		expect(chunks[0]?.pcm.length).toBe(9);
-	});
-
-	it("synthesize routes through the streaming entry and concatenates chunks", async () => {
-		const backend = new FfiOmniVoiceBackend({
-			ffi: fakeFfi("ignored", { ttsSamples: 7, ttsStreamSupported: true }),
-			ctx: 1n,
-			sampleRate: 16_000,
-		});
-		const out = await backend.synthesize({
-			phrase: phrase("speak"),
-			preset: preset(),
-			cancelSignal: { cancelled: false },
-		});
-		expect(out.pcm.length).toBe(7);
-		expect(out.sampleRate).toBe(16_000);
-		expect(out.phraseId).toBe(1);
-	});
-
-	it("passes NULL for the default speaker preset so OmniVoice uses bundle defaults", async () => {
-		const speakerIds: Array<string | null> = [];
-		const base = fakeFfi("ignored", {
-			ttsSamples: 4,
-			ttsStreamSupported: true,
-		});
-		const backend = new FfiOmniVoiceBackend({
-			ffi: {
-				...base,
-				ttsSynthesizeStream: (args) => {
-					speakerIds.push(args.speakerPresetId);
-					return base.ttsSynthesizeStream(args);
-				},
-			},
-			ctx: 1n,
-			sampleRate: 24_000,
-		});
-
-		await backend.synthesize({
-			phrase: phrase("hello"),
-			preset: preset(),
-			cancelSignal: { cancelled: false },
-		});
-
-		expect(speakerIds).toEqual(["default"]);
-	});
-
-	it("preserves non-default speaker preset ids for multi-voice bundles", async () => {
-		const speakerIds: Array<string | null> = [];
-		const base = fakeFfi("ignored", {
-			ttsSamples: 4,
-			ttsStreamSupported: false,
-		});
-		const backend = new FfiOmniVoiceBackend({
-			ffi: {
-				...base,
-				ttsSynthesize: (args) => {
-					speakerIds.push(args.speakerPresetId);
-					return base.ttsSynthesize(args);
-				},
-			},
-			ctx: 1n,
-			sampleRate: 24_000,
-		});
-
-		await backend.synthesize({
-			phrase: phrase("hello"),
-			preset: { ...preset(), voiceId: "narrator" },
-			cancelSignal: { cancelled: false },
-		});
-
-		expect(speakerIds).toEqual(["narrator"]);
-	});
-
-	it("batch transcribe uses the fused batch ABI with the original sample rate", async () => {
-		const seen: Array<{ sampleRateHz: number; samples: number }> = [];
-		const base = fakeFfi("ignored", {
-			ttsSamples: 4,
-			asrStreamSupported: true,
-		});
-		const backend = new FfiOmniVoiceBackend({
-			ffi: {
-				...base,
-				asrTranscribe: (args) => {
-					seen.push({
-						sampleRateHz: args.sampleRateHz,
-						samples: args.pcm.length,
-					});
-					return "Hello, say hello back.";
-				},
-			},
-			ctx: 1n,
-			sampleRate: 24_000,
-		});
-
-		const transcript = await backend.transcribe({
-			pcm: new Float32Array(24_000),
-			sampleRate: 24_000,
-		});
-
-		expect(transcript).toBe("Hello, say hello back.");
-		expect(seen).toEqual([{ sampleRateHz: 24_000, samples: 24_000 }]);
-	});
-
-	it("a pre-set cancelSignal short-circuits synthesizeStream before the body chunk", async () => {
-		const backend = new FfiOmniVoiceBackend({
-			ffi: fakeFfi("ignored", { ttsSamples: 32, ttsStreamSupported: true }),
-			ctx: 1n,
-		});
-		const chunks: TtsPcmChunk[] = [];
-		const res = await backend.synthesizeStream({
-			phrase: phrase("hello"),
-			preset: preset(),
-			cancelSignal: { cancelled: true },
-			onChunk: (c) => {
-				chunks.push(c);
-			},
-		});
-		expect(res.cancelled).toBe(true);
-		// The fake always fires the final tail; the body chunk is the one we
-		// expect to be skipped — but the fake emits it then we return true,
-		// so at most a final tail is observed with isFinal true.
-		expect(chunks.every((c) => c.isFinal)).toBe(true);
-	});
-
-	it("cancelTts is callable on the FFI backend", () => {
-		const backend = new FfiOmniVoiceBackend({
-			ffi: fakeFfi("x", { ttsStreamSupported: true }),
-			ctx: 1n,
-		});
-		expect(() => backend.cancelTts()).not.toThrow();
-	});
-});
 
 describe("nativeRejectedRangeToRollbackRange", () => {
 	it("converts native half-open verifier ranges to inclusive rollback ranges", () => {
@@ -329,7 +142,6 @@ describe("EngineVoiceBridge direct synthesis guard", () => {
 	it("rejects direct WAV synthesis on the silent backend", async () => {
 		const bridge = EngineVoiceBridge.start({
 			bundleRoot,
-			useFfiBackend: false,
 			lifecycleLoaders: lifecycleLoadersOk(),
 		});
 		await bridge.arm();
@@ -365,7 +177,6 @@ describe("EngineVoiceBridge direct synthesis guard", () => {
 		};
 		const bridge = EngineVoiceBridge.start({
 			bundleRoot,
-			useFfiBackend: false,
 			lifecycleLoaders: lifecycleLoadersOk(),
 			backendOverride: backend,
 		});

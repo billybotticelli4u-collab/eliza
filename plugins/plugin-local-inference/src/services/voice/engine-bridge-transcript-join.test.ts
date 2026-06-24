@@ -116,7 +116,6 @@ function bridgeWithJoin(opts: {
 }): EngineVoiceBridge {
 	const bridge = EngineVoiceBridge.start({
 		bundleRoot: opts.bundleRoot,
-		useFfiBackend: false,
 		lifecycleLoaders: lifecycleLoadersOk(),
 	});
 	const internals = bridge as unknown as {

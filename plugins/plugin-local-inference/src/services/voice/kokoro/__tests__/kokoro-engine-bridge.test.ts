@@ -27,21 +27,10 @@ function makeKokoroConfig(): KokoroEngineDiscoveryResult {
 }
 
 describe("EngineVoiceBridge — kokoroOnly option validation", () => {
-	it("throws when kokoroOnly is combined with useFfiBackend:true", () => {
-		expect(() =>
-			EngineVoiceBridge.start({
-				bundleRoot: "",
-				useFfiBackend: true,
-				kokoroOnly: makeKokoroConfig(),
-			}),
-		).toThrow(VoiceStartupError);
-	});
-
 	it("throws when kokoroOnly is combined with backendOverride", () => {
 		expect(() =>
 			EngineVoiceBridge.start({
 				bundleRoot: "",
-				useFfiBackend: false,
 				kokoroOnly: makeKokoroConfig(),
 				backendOverride: {
 					async synthesize() {

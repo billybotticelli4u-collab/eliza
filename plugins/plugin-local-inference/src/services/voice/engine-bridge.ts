@@ -13,13 +13,11 @@
  * Plus rollback queue (MTP rejection → cancel pending TTS chunks)
  * and barge-in cancellation (mic VAD → drain ring buffer + cancel TTS).
  *
- * Two TTS backends are exposed:
- *   - `StubOmniVoiceBackend`: deterministic synthetic PCM. Used by tests
- *     and any path that wants the streaming graph without real audio.
- *   - `FfiOmniVoiceBackend`: forwards through the fused
- *     `libelizainference.{dylib,so,dll}` ABI. The bridge creates the
- *     context lazily when voice is armed or first used, so voice-off
- *     does not keep OmniVoice weights resident.
+ * The TTS backend on the non-kokoroOnly path is the deterministic
+ * `StubOmniVoiceBackend` (or an injected `ttsBackendOverride`); real
+ * on-device speech is served exclusively through the kokoroOnly path
+ * (`KokoroTtsBackend`). The retired `FfiOmniVoiceBackend` (fused OmniVoice
+ * TTS) no longer exists.
  *
  * Per AGENTS.md §3 + §9 (no defensive code, no log-and-continue), every
  * startup precondition surfaces as a thrown `VoiceStartupError`. There
@@ -27,7 +25,6 @@
  */
 
 import { existsSync, readdirSync, statSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import type { IAgentRuntime } from "@elizaos/core";
 import { logger } from "@elizaos/core";
@@ -44,7 +41,6 @@ import type {
 	ElizaInferenceFfi,
 	NativeVerifierEvent,
 } from "./ffi-bindings";
-import { loadElizaInferenceFfi } from "./ffi-bindings";
 import { KokoroTtsBackend } from "./kokoro/kokoro-backend";
 import type { KokoroEngineDiscoveryResult } from "./kokoro/kokoro-engine-discovery";
 import { pickKokoroRuntimeBackend } from "./kokoro/pick-runtime";
@@ -78,26 +74,15 @@ import {
 } from "./pipeline-impls";
 import type { VoiceProfileStore } from "./profile-store";
 import { type SchedulerEvents, VoiceScheduler } from "./scheduler";
-import { AgentSelfVoiceImprint } from "./self-voice-imprint";
+import type { AgentSelfVoiceImprint } from "./self-voice-imprint";
 import {
 	type MmapRegionHandle,
 	SharedResourceRegistry,
 } from "./shared-resources";
-import {
-	type VoiceAttributionOutput,
+import type {
+	VoiceAttributionOutput,
 	VoiceAttributionPipeline,
 } from "./speaker/attribution-pipeline";
-import {
-	type Diarizer,
-	PYANNOTE_SEGMENTATION_3_INT8_MODEL_ID,
-} from "./speaker/diarizer";
-import { FusedDiarizer } from "./speaker/diarizer-fused";
-import type { SpeakerEncoder } from "./speaker/encoder";
-import { FusedSpeakerEncoder } from "./speaker/encoder-fused";
-import {
-	SPEAKER_GGML_EMBEDDING_DIM,
-	SPEAKER_GGML_SAMPLE_RATE,
-} from "./speaker/encoder-ggml";
 import {
 	DEFAULT_VOICE_PRESET_REL_PATH,
 	SpeakerPresetCache,
@@ -141,40 +126,6 @@ const PHRASE_MAX_TOKENS_DEFAULT = 8;
 const STUB_PCM_MS_PER_PHRASE = 100;
 const STUB_PCM_STREAM_CHUNKS = 4;
 
-/**
- * Resolve the `speaker_preset_id` value to send across the FFI boundary.
- *
- * Historically this returned `null` for the default voice — the C side then
- * treated `null` as "auto-voice mode" and ignored any preset file under
- * `cache/voice-preset-default.bin`. That was the right behaviour when the
- * default preset was a 256-fp32-zero placeholder; it's wrong now that the
- * default preset can be a real (v2) OmniVoice sam freeze. With ABI v4
- * the FFI bridge looks up `<bundle>/cache/voice-preset-<id>.bin` when the
- * id is supplied and applies the `(instruct, ref_audio_tokens, ref_text)`
- * triple to `ov_tts_params` — so we must always pass the id.
- *
- * The only case we return `null` is when the preset shape is degenerate
- * (no embedding, no ref-audio-tokens, no instruct) — i.e. an explicit
- * "no preset" signal from a caller that doesn't want a voice bound. The
- * FFI side honours `null` by running OmniVoice's intrinsic auto-voice
- * path.
- */
-function ffiSpeakerPresetId(preset: SpeakerPreset): string | null {
-	const hasV2Payload =
-		(preset.instruct !== undefined && preset.instruct.length > 0) ||
-		(preset.refText !== undefined && preset.refText.length > 0) ||
-		(preset.refAudioTokens !== undefined &&
-			preset.refAudioTokens.tokens.length > 0);
-	const hasEmbedding = preset.embedding.length > 0;
-	if (!hasV2Payload && !hasEmbedding) {
-		// Degenerate preset (e.g. the 1052-byte all-zero placeholder). The C
-		// side cannot do anything useful with it; let OmniVoice pick its own
-		// voice via the auto-voice path.
-		return null;
-	}
-	return preset.voiceId;
-}
-
 /** Re-exported from `./errors` so existing `engine-bridge` importers don't churn. */
 export { VoiceStartupError };
 
@@ -207,25 +158,18 @@ export interface TtsPcmChunk {
 }
 
 /**
- * Streaming-TTS seam between the fused `libelizainference` runtime and
- * W9's voice scheduler. The scheduler calls `synthesizeStream(...)` for
- * a phrase and writes each delivered `pcm` segment into the
- * `PcmRingBuffer` on the same scheduler tick (AGENTS.md §4 —
+ * Streaming-TTS seam W9's voice scheduler drives. The scheduler calls
+ * `synthesizeStream(...)` for a phrase and writes each delivered `pcm`
+ * segment into the `PcmRingBuffer` on the same scheduler tick (AGENTS.md §4 —
  * phrase-chunk → TTS within one scheduler tick); returning `true` from
  * `onChunk` (or flipping `cancelSignal.cancelled`) hard-cancels the
  * in-flight forward pass at the next kernel boundary (barge-in /
  * MTP-rejected tail).
  *
- * Both `OmniVoiceBackend` implementations in this module satisfy it:
- *   - `FfiOmniVoiceBackend` forwards to
- *     `eliza_inference_tts_synthesize_stream` when the loaded build
- *     advertises streaming TTS (`tts_stream_supported() == 1`), else it
- *     synthesizes whole and emits the result as one body chunk + a final
- *     tail (no silent "streaming" lie — the chunk count just collapses
- *     to one when the build is non-streaming);
- *   - `StubOmniVoiceBackend` emits deterministic synthetic PCM split
- *     into a fixed number of chunks so scheduler tests can observe the
- *     incremental handoff without a real model.
+ * `StubOmniVoiceBackend` satisfies it by emitting deterministic synthetic
+ * PCM split into a fixed number of chunks so scheduler tests can observe
+ * the incremental handoff without a real model. The live on-device path is
+ * `KokoroTtsBackend` (kokoroOnly).
  */
 export interface StreamingTtsBackend {
 	/**
@@ -336,243 +280,11 @@ export class StubOmniVoiceBackend
 	}
 }
 
-/**
- * FFI-backed TTS backend. Forwards each `synthesize()` call through the
- * fused `libelizainference` ABI declared in
- * `packages/app-core/scripts/omnivoice-fuse/ffi.h`. The library handle
- * + a per-engine context pointer are held by the bridge and passed in
- * at construction so this backend stays a thin adapter.
- *
- * Until the real fused build ships, the binding is exercised against
- * the compatibility C library at `scripts/omnivoice-fuse/ffi-stub.c`, which returns
- * `ELIZA_ERR_NOT_IMPLEMENTED` for `tts_synthesize` — the binding then
- * raises `VoiceLifecycleError({code:"kernel-missing"})`. The adapter
- * re-wraps that as `VoiceStartupError("missing-fused-build", ...)` so
- * the engine layer's startup-error taxonomy stays unified. No silent
- * fallback (AGENTS.md §3 + §9).
- */
-export class FfiOmniVoiceBackend
-	implements OmniVoiceBackend, StreamingTtsBackend
-{
-	readonly id = "ffi" as const;
-	private readonly ffi: ElizaInferenceFfi;
-	private readonly getContext: () => ElizaInferenceContextHandle;
-	private readonly sampleRate: number;
-	private readonly maxSecondsPerPhrase: number;
-
-	constructor(args: {
-		ffi: ElizaInferenceFfi;
-		ctx?: ElizaInferenceContextHandle;
-		getContext?: () => ElizaInferenceContextHandle;
-		sampleRate?: number;
-		maxSecondsPerPhrase?: number;
-	}) {
-		this.ffi = args.ffi;
-		this.getContext =
-			args.getContext ??
-			(() => {
-				if (args.ctx === undefined) {
-					throw new VoiceStartupError(
-						"missing-fused-build",
-						"[voice] FFI backend has no context provider",
-					);
-				}
-				return args.ctx;
-			});
-		this.sampleRate = args.sampleRate ?? SAMPLE_RATE_DEFAULT;
-		this.maxSecondsPerPhrase = args.maxSecondsPerPhrase ?? 6;
-	}
-
-	/** True when the loaded `libelizainference` advertises streaming TTS. */
-	supportsStreamingTts(): boolean {
-		return this.ffi.ttsStreamSupported();
-	}
-
-	/**
-	 * One-shot synthesis returning the whole phrase as an `AudioChunk`.
-	 * When the loaded build advertises streaming TTS this routes through
-	 * `eliza_inference_tts_synthesize_stream` and concatenates the
-	 * delivered chunks (so the chunk-aware native path is exercised even
-	 * for whole-phrase callers); otherwise it uses the batch
-	 * `eliza_inference_tts_synthesize` symbol. `cancelSignal` is honoured
-	 * at chunk boundaries — a cancelled stream returns whatever was
-	 * synthesized so far.
-	 */
-	async synthesize(args: {
-		phrase: Phrase;
-		preset: SpeakerPreset;
-		cancelSignal: { cancelled: boolean };
-		onKernelTick?: () => void;
-	}): Promise<AudioChunk> {
-		args.onKernelTick?.();
-		const ctx = this.getContext();
-		if (this.ffi.ttsStreamSupported()) {
-			const parts: Float32Array[] = [];
-			let total = 0;
-			this.ffi.ttsSynthesizeStream({
-				ctx,
-				text: args.phrase.text,
-				speakerPresetId: ffiSpeakerPresetId(args.preset),
-				onChunk: ({ pcm, isFinal }) => {
-					args.onKernelTick?.();
-					if (!isFinal && pcm.length > 0) {
-						parts.push(pcm);
-						total += pcm.length;
-					}
-					return args.cancelSignal.cancelled === true;
-				},
-			});
-			const merged = new Float32Array(total);
-			let off = 0;
-			for (const part of parts) {
-				merged.set(part, off);
-				off += part.length;
-			}
-			return {
-				phraseId: args.phrase.id,
-				fromIndex: args.phrase.fromIndex,
-				toIndex: args.phrase.toIndex,
-				pcm: merged,
-				sampleRate: this.sampleRate,
-			};
-		}
-		const out = new Float32Array(this.sampleRate * this.maxSecondsPerPhrase);
-		const samples = this.ffi.ttsSynthesize({
-			ctx,
-			text: args.phrase.text,
-			speakerPresetId: ffiSpeakerPresetId(args.preset),
-			out,
-		});
-		return {
-			phraseId: args.phrase.id,
-			fromIndex: args.phrase.fromIndex,
-			toIndex: args.phrase.toIndex,
-			pcm: out.subarray(0, samples),
-			sampleRate: this.sampleRate,
-		};
-	}
-
-	/**
-	 * Streaming synthesis: forwards to `eliza_inference_tts_synthesize_stream`
-	 * when the build advertises a streaming decoder. When it does NOT
-	 * (`tts_stream_supported() == 0`), this still satisfies the seam — but
-	 * with exactly one body chunk + one final tail (the batch synthesis
-	 * result), so the caller never mistakes a non-streaming build for a
-	 * streaming one (no fallback sludge — the chunk count is the honest
-	 * signal). The native side checks `ctx->tts_cancel` (set via
-	 * `eliza_inference_cancel_tts`) on top of the `onChunk` return value.
-	 * A non-streaming build cannot be interrupted while the native batch
-	 * forward pass is inside `ttsSynthesize`; it only observes cancellation
-	 * before emitting the body chunk. Barge-in-critical product paths should
-	 * require `supportsStreamingTts()`.
-	 */
-	async synthesizeStream(args: {
-		phrase: Phrase;
-		preset: SpeakerPreset;
-		cancelSignal: { cancelled: boolean };
-		onChunk: (chunk: TtsPcmChunk) => boolean | undefined;
-		onKernelTick?: () => void;
-	}): Promise<{ cancelled: boolean }> {
-		const ctx = this.getContext();
-		if (this.ffi.ttsStreamSupported()) {
-			const { cancelled } = this.ffi.ttsSynthesizeStream({
-				ctx,
-				text: args.phrase.text,
-				speakerPresetId: ffiSpeakerPresetId(args.preset),
-				onChunk: ({ pcm, isFinal }) => {
-					args.onKernelTick?.();
-					if (args.cancelSignal.cancelled) return true;
-					const want = args.onChunk({
-						pcm,
-						sampleRate: this.sampleRate,
-						isFinal,
-					});
-					// Re-read the (mutable) cancel flag — the chunk callback or a
-					// concurrent barge-in may have flipped it.
-					return want === true || args.cancelSignal.cancelled;
-				},
-			});
-			return { cancelled };
-		}
-		// Non-streaming build: one batch forward pass, surfaced as a single
-		// body chunk + final tail.
-		args.onKernelTick?.();
-		const out = new Float32Array(this.sampleRate * this.maxSecondsPerPhrase);
-		const samples = this.ffi.ttsSynthesize({
-			ctx,
-			text: args.phrase.text,
-			speakerPresetId: ffiSpeakerPresetId(args.preset),
-			out,
-		});
-		let cancelled = args.cancelSignal.cancelled === true;
-		if (!cancelled && samples > 0) {
-			const want = args.onChunk({
-				pcm: out.subarray(0, samples),
-				sampleRate: this.sampleRate,
-				isFinal: false,
-			});
-			cancelled = want === true || args.cancelSignal.cancelled === true;
-		}
-		args.onChunk({
-			pcm: new Float32Array(0),
-			sampleRate: this.sampleRate,
-			isFinal: true,
-		});
-		return { cancelled };
-	}
-
-	/** Hard-cancel any in-flight TTS forward pass on this backend's context. */
-	cancelTts(): void {
-		this.ffi.cancelTts(this.getContext());
-	}
-
-	/**
-	 * Batch transcription. One-shot callers should use the fused batch ABI
-	 * directly so the native side receives the original sample-rate metadata
-	 * and can apply its own audio preprocessing. Live mic streaming remains
-	 * available through `EngineVoiceBridge.createStreamingTranscriber()`.
-	 */
-	async transcribe(args: TranscriptionAudio): Promise<string> {
-		return this.ffi.asrTranscribe({
-			ctx: this.getContext(),
-			pcm: args.pcm,
-			sampleRateHz: args.sampleRate,
-		});
-	}
-
-	/** Transcribe + per-word timings when the fused build is ABI v12+; otherwise
-	 *  the text with empty `words` (the caller degrades to segment highlight). */
-	async transcribeTimed(
-		args: TranscriptionAudio,
-	): Promise<{ text: string; words: AsrWordTiming[] }> {
-		if (this.ffi.timedAsrSupported()) {
-			const res = this.ffi.asrTranscribeTimed({
-				ctx: this.getContext(),
-				pcm: args.pcm,
-				sampleRateHz: args.sampleRate,
-			});
-			return { text: res.text.trim(), words: res.words };
-		}
-		logger.debug(
-			"[FfiOmniVoiceBackend] timedAsrSupported()===false on the active fused build — per-word timings dropped, transcript player degrades to segment-level highlight",
-		);
-		return { text: (await this.transcribe(args)).trim(), words: [] };
-	}
-}
-
 export interface EngineVoiceBridgeOptions {
 	/**
-	 * Bundle root on disk. Must contain `cache/voice-preset-default.bin`
-	 * and the FFI library (`lib/libelizainference.{dylib,so}`) when
-	 * `useFfiBackend === true`.
+	 * Bundle root on disk. Must contain `cache/voice-preset-default.bin`.
 	 */
 	bundleRoot: string;
-	/**
-	 * When true, use `FfiOmniVoiceBackend`. When false, use the deterministic test backend
-	 * only for lifecycle/unit tests; live sessions and direct synthesis reject
-	 * the deterministic test backend before user-visible audio can be emitted.
-	 */
-	useFfiBackend: boolean;
 	/** Override sample rate. Defaults to 24 kHz. */
 	sampleRate?: number;
 	/** Override ring buffer capacity (samples). Defaults to 4 s @ 24 kHz. */
@@ -598,16 +310,16 @@ export interface EngineVoiceBridgeOptions {
 	/** Optional scheduler event listeners (rollback, audio, cancel). */
 	events?: SchedulerEvents;
 	/**
-	 * Optional override for the TTS backend. When set, supersedes
-	 * `useFfiBackend`. Tests use this to inject a controllable backend
-	 * (e.g. one that holds synthesis open until a deferred resolves) so
-	 * rollback timing can be observed deterministically.
+	 * Optional override for the TTS backend. Supersedes the default
+	 * `StubOmniVoiceBackend` on the non-kokoroOnly path. Tests use this to
+	 * inject a controllable backend (e.g. one that holds synthesis open until
+	 * a deferred resolves) so rollback timing can be observed deterministically.
 	 */
 	backendOverride?: OmniVoiceBackend;
 	/**
-	 * Override only the TTS backend while keeping the fused bundle lifecycle
-	 * and ASR FFI loaded. Used when a bundle falls back from OmniVoice speech
-	 * to Kokoro speech but still needs bundled Qwen3-ASR for mic input.
+	 * Override only the TTS backend on the non-kokoroOnly path. Used by tests
+	 * that want a specific backend while keeping the default bundle/ASR
+	 * scaffolding.
 	 */
 	ttsBackendOverride?: OmniVoiceBackend;
 	/** Optional speaker preset paired with `ttsBackendOverride`. */
@@ -632,9 +344,8 @@ export interface EngineVoiceBridgeOptions {
 	 * speaker-preset + FFI checks the fused omnivoice path requires.
 	 * Kokoro voices are picked by id (`KOKORO_VOICE_PACKS`), so the bundle's
 	 * per-user speaker preset is not used. Mutually exclusive with
-	 * `useFfiBackend: true` and `backendOverride`. Lifecycle loaders
-	 * default to empty lifecycle handles (ORT owns the model memory; nothing to
-	 * mmap-evict).
+	 * `backendOverride`. Lifecycle loaders default to empty lifecycle handles
+	 * (ORT owns the model memory; nothing to mmap-evict).
 	 */
 	kokoroOnly?: KokoroEngineDiscoveryResult;
 	/**
@@ -1029,10 +740,10 @@ export class EngineVoiceBridge {
 	 */
 	static start(opts: EngineVoiceBridgeOptions): EngineVoiceBridge {
 		if (opts.kokoroOnly) {
-			if (opts.useFfiBackend || opts.backendOverride) {
+			if (opts.backendOverride) {
 				throw new VoiceStartupError(
 					"invalid-options",
-					"[voice] kokoroOnly cannot be combined with useFfiBackend or backendOverride. Caller must pick exactly one backend path.",
+					"[voice] kokoroOnly cannot be combined with backendOverride. Caller must pick exactly one backend path.",
 				);
 			}
 			return EngineVoiceBridge.startKokoroOnly(opts);
@@ -1068,16 +779,13 @@ export class EngineVoiceBridge {
 			phraseCache.put(entry);
 		}
 
-		// FFI binding + per-bridge context. When the bridge runs against
-		// the real fused build, the same `ffi`/`ctx` pair is shared by:
-		//   - the TTS backend (`FfiOmniVoiceBackend.synthesize`),
-		//   - the lifecycle loaders (`MmapRegionHandle.evictPages` calls
-		//     `ffi.mmapEvict(ctx, "tts" | "asr")`).
-		// Tests can opt out by either passing `lifecycleLoaders` (mocks
-		// `evictPages`) or `backendOverride` (mocks the backend) or
-		// setting `useFfiBackend: false` (test TTS + empty evict transition).
-		let ffiHandle: ElizaInferenceFfi | null = null;
-		let ffiContextRef: FfiContextRef | null = null;
+		// The non-kokoroOnly path never sources a fused FFI handle: real
+		// on-device speech is served exclusively through the kokoroOnly path
+		// (`KokoroTtsBackend`). This path uses the deterministic
+		// `StubOmniVoiceBackend` (or an injected `backendOverride` /
+		// `ttsBackendOverride`) so `ffiHandle`/`ffiContextRef` stay null.
+		const ffiHandle: ElizaInferenceFfi | null = null;
+		const ffiContextRef: FfiContextRef | null = null;
 		let backend: OmniVoiceBackend;
 		const asrAvailable = bundleHasRegularFile(
 			path.join(opts.bundleRoot, "asr"),
@@ -1088,46 +796,8 @@ export class EngineVoiceBridge {
 				"[voice] backendOverride and ttsBackendOverride are mutually exclusive.",
 			);
 		}
-		if (opts.backendOverride && opts.useFfiBackend) {
-			throw new VoiceStartupError(
-				"missing-fused-build",
-				"[voice] backendOverride cannot be combined with useFfiBackend=true. Voice-on production paths must load libelizainference and verify its ABI instead of bypassing the fused runtime.",
-			);
-		}
 		if (opts.backendOverride) {
 			backend = opts.backendOverride;
-		} else if (opts.useFfiBackend) {
-			const libPath = locateBundleLibrary(opts.bundleRoot);
-			if (!existsSync(libPath)) {
-				throw new VoiceStartupError(
-					"missing-ffi",
-					`[voice] Fused omnivoice library not found under ${path.join(opts.bundleRoot, "lib")} (tried ${libraryFilenames().join(", ")}). Build via packages/app-core/scripts/build-llama-cpp-mtp.mjs (omnivoice-fuse target).`,
-				);
-			}
-			ffiHandle = loadElizaInferenceFfi(libPath);
-			const contextRef: FfiContextRef = {
-				current: null,
-				ensure: () => {
-					if (!ffiHandle) {
-						throw new VoiceStartupError(
-							"missing-ffi",
-							"[voice] FFI context requested without a loaded libelizainference handle",
-						);
-					}
-					if (contextRef.current === null) {
-						contextRef.current = ffiHandle.create(opts.bundleRoot);
-					}
-					return contextRef.current;
-				},
-			};
-			ffiContextRef = contextRef;
-			backend =
-				opts.ttsBackendOverride ??
-				new FfiOmniVoiceBackend({
-					ffi: ffiHandle,
-					getContext: contextRef.ensure,
-					sampleRate,
-				});
 		} else {
 			backend = opts.ttsBackendOverride ?? new StubOmniVoiceBackend(sampleRate);
 		}
@@ -1148,31 +818,17 @@ export class EngineVoiceBridge {
 				readPositiveIntEnv("ELIZA_VOICE_MAX_IN_FLIGHT_PHRASES"),
 		};
 
+		// Self-voice imprint requires the fused speaker encoder, which this
+		// path cannot source (no fused handle). Attribution / imprint are only
+		// available on the kokoroOnly path with an injected fused handle, so the
+		// scheduler here just forwards `onAudio` to the caller.
 		const sinkOverride = opts.sink;
-		let selfVoiceImprint: AgentSelfVoiceImprint | null = null;
-		const schedulerEvents: SchedulerEvents = {
-			...(opts.events ?? {}),
-			onAudio(chunk) {
-				opts.events?.onAudio?.(chunk);
-				if (!selfVoiceImprint) return;
-				void selfVoiceImprint
-					.observeAudio(chunk.pcm, chunk.sampleRate)
-					.catch((err: unknown) => {
-						logger.warn(
-							{
-								error: err instanceof Error ? err.message : String(err),
-							},
-							"[voice-bridge] agent self-voice imprint update failed",
-						);
-					});
-			},
-		};
 		const scheduler = new VoiceScheduler(
 			config,
 			sinkOverride
 				? { backend, sink: sinkOverride, phraseCache }
 				: { backend, phraseCache },
-			schedulerEvents,
+			opts.events ?? {},
 		);
 
 		// Wire the voice lifecycle. The lifecycle starts in `voice-off` —
@@ -1187,103 +843,15 @@ export class EngineVoiceBridge {
 			defaultLifecycleLoaders(opts.bundleRoot, ffiHandle, ffiContextRef);
 		const lifecycle = new VoiceLifecycle({ registry, loaders });
 
-		// Wire speaker-attribution when a profile store is provided. The
-		// attribution pipeline wraps the fused encoder + diarizer + profile-store.
-		// Both run through the ONE fused `libelizainference` handle via its
-		// `eliza_inference_speaker_*` / `_diariz_*` ABI — there is no standalone
-		// `libvoice_classifier` runtime.
-		//
-		// Fail-fast at ARM time: the fused speaker ABI is probed synchronously
-		// here (`FusedSpeakerEncoder.isSupported`). When the build does not
-		// advertise it, this throws `VoiceStartupError` rather than silently
-		// degrading attribution to "unknown speaker" on the first turn. The
-		// native session `load()` runs lazily on first encode/diarize, but the
-		// capability is decided up front.
-		let attributionPipeline: VoiceAttributionPipeline | null = null;
+		// Speaker-attribution needs a fused `libelizainference` handle (its
+		// `eliza_inference_speaker_*` / `_diariz_*` ABI). The non-kokoroOnly
+		// bundle path no longer sources a fused handle, so it cannot serve
+		// attribution — fail fast rather than silently dropping it.
 		if (opts.profileStore) {
-			const fusedFfi = ffiHandle;
-			const fusedCtx = ffiContextRef;
-			if (!fusedFfi || !fusedCtx) {
-				throw new VoiceStartupError(
-					"missing-fused-build",
-					"[voice] Speaker-attribution requires the fused libelizainference handle (useFfiBackend). No standalone speaker runtime exists.",
-				);
-			}
-			if (!FusedSpeakerEncoder.isSupported(fusedFfi)) {
-				throw new VoiceStartupError(
-					"missing-fused-build",
-					"[voice] The loaded libelizainference build lacks the speaker ABI (eliza_inference_speaker_supported() == 0). Rebuild with the WeSpeaker forward graph linked in (eliza_inference_speaker_* symbols).",
-				);
-			}
-			// Fused encoder: probe passed above; the native session opens lazily
-			// on first encode() so voice-off does not keep the model resident.
-			let resolvedEncoder: SpeakerEncoder | null = null;
-			let encoderLoadError: Error | null = null;
-			const lazyEncoder: SpeakerEncoder = {
-				embeddingDim: SPEAKER_GGML_EMBEDDING_DIM,
-				sampleRate: SPEAKER_GGML_SAMPLE_RATE,
-				async encode(pcm: Float32Array): Promise<Float32Array> {
-					if (encoderLoadError) throw encoderLoadError;
-					if (!resolvedEncoder) {
-						try {
-							resolvedEncoder = await FusedSpeakerEncoder.load({
-								ffi: fusedFfi,
-								ctx: () => fusedCtx.ensure(),
-							});
-						} catch (err) {
-							encoderLoadError =
-								err instanceof Error ? err : new Error(String(err));
-							throw encoderLoadError;
-						}
-					}
-					return resolvedEncoder.encode(pcm);
-				},
-				async dispose(): Promise<void> {
-					await resolvedEncoder?.dispose();
-				},
-			};
-			selfVoiceImprint = new AgentSelfVoiceImprint({
-				encoder: lazyEncoder,
-			});
-			// Fused diarizer (optional). When the build does not advertise the
-			// diarizer ABI, attribution runs without it — a single-speaker turn
-			// collapses to one segment (the attribution-pipeline localSpeakerId=0
-			// path). The diarizer is NOT a fail-fast gate (unlike the encoder):
-			// it refines multi-speaker windows, it is not required to attribute a
-			// single speaker.
-			let lazyDiarizer: Diarizer | undefined;
-			if (FusedDiarizer.isSupported(fusedFfi)) {
-				let resolvedDiarizer: Diarizer | null = null;
-				let diarizerLoadError: Error | null = null;
-				lazyDiarizer = {
-					modelId: PYANNOTE_SEGMENTATION_3_INT8_MODEL_ID,
-					sampleRate: SPEAKER_GGML_SAMPLE_RATE,
-					async diarizeWindow(pcm: Float32Array) {
-						if (diarizerLoadError) throw diarizerLoadError;
-						if (!resolvedDiarizer) {
-							try {
-								resolvedDiarizer = await FusedDiarizer.load({
-									ffi: fusedFfi,
-									ctx: () => fusedCtx.ensure(),
-								});
-							} catch (err) {
-								diarizerLoadError =
-									err instanceof Error ? err : new Error(String(err));
-								throw diarizerLoadError;
-							}
-						}
-						return resolvedDiarizer.diarizeWindow(pcm);
-					},
-					async dispose(): Promise<void> {
-						await resolvedDiarizer?.dispose();
-					},
-				};
-			}
-			attributionPipeline = new VoiceAttributionPipeline({
-				encoder: lazyEncoder,
-				...(lazyDiarizer ? { diarizer: lazyDiarizer } : {}),
-				profileStore: opts.profileStore,
-			});
+			throw new VoiceStartupError(
+				"missing-fused-build",
+				"[voice] Speaker-attribution requires a fused libelizainference handle, which the non-kokoroOnly bundle path no longer provides. Use startKokoroOnly (`kokoroOnly`) with an injected fused handle for speaker-attribution.",
+			);
 		}
 
 		// W3-9 / F1 — construct the cancellation coordinator + optimistic policy
@@ -1301,8 +869,8 @@ export class EngineVoiceBridge {
 			ffiContextRef,
 			asrAvailable,
 			phraseCache,
-			attributionPipeline,
-			selfVoiceImprint,
+			null,
+			null,
 			wiring?.coordinator ?? null,
 			wiring?.policy ?? null,
 			isEventRuntime(opts.runtime) ? opts.runtime : null,
@@ -1567,8 +1135,8 @@ export class EngineVoiceBridge {
 
 	/**
 	 * The streaming-TTS seam W9's scheduler drives: returns the active
-	 * backend as a `StreamingTtsBackend` (`FfiOmniVoiceBackend` against the
-	 * fused build, `StubOmniVoiceBackend` for tests). The scheduler calls
+	 * backend as a `StreamingTtsBackend` (`KokoroTtsBackend` on the live
+	 * kokoroOnly path, `StubOmniVoiceBackend` for tests). The scheduler calls
 	 * `synthesizeStream(...)` for each phrase and writes the delivered PCM
 	 * segments into its `PcmRingBuffer` on the same scheduler tick. Returns
 	 * null when an injected `backendOverride` does not implement the seam.
@@ -2194,43 +1762,6 @@ function bundleMmapRegion(
 /** Re-export for the engine and tests that want the default loader. */
 export { defaultLifecycleLoaders };
 
-/**
- * Platform-specific shared-library suffix for the fused omnivoice build.
- * macOS dylib, Linux/Android so, Windows dll. Windows artifacts have
- * used both `elizainference.dll` and `libelizainference.dll` names in
- * cross-build toolchains, so the runtime probes both.
- */
-function libraryFilenames(): string[] {
-	if (process.platform === "darwin") return ["libelizainference.dylib"];
-	if (process.platform === "win32") {
-		return ["elizainference.dll", "libelizainference.dll"];
-	}
-	return ["libelizainference.so"];
-}
-
-function locateBundleLibrary(bundleRoot: string): string {
-	const exact = process.env.ELIZA_INFERENCE_LIBRARY?.trim();
-	if (exact && existsSync(exact)) return exact;
-
-	const dirs = [
-		path.join(bundleRoot, "lib"),
-		exact ? path.dirname(exact) : null,
-		process.env.ELIZA_INFERENCE_LIB_DIR?.trim() || null,
-		...managedFusedRuntimeDirs(),
-	].filter((dir): dir is string => Boolean(dir));
-
-	for (const dir of dirs) {
-		for (const name of libraryFilenames()) {
-			const candidate = path.join(dir, name);
-			if (existsSync(candidate)) return candidate;
-		}
-	}
-	return path.join(
-		dirs[0] ?? path.join(bundleRoot, "lib"),
-		libraryFilenames()[0] ?? "libelizainference.so",
-	);
-}
-
 function directoryHasRegularFile(dir: string): boolean {
 	for (const entry of readdirSync(dir, { withFileTypes: true })) {
 		if (entry.isFile()) return true;
@@ -2245,20 +1776,4 @@ function bundleHasRegularFile(dir: string): boolean {
 	} catch {
 		return false;
 	}
-}
-
-function managedFusedRuntimeDirs(): string[] {
-	if (process.env.ELIZA_INFERENCE_MANAGED_LOOKUP?.trim() === "0") {
-		return [];
-	}
-	const root = localInferenceRoot();
-	const platform = process.platform;
-	const arch = os.arch();
-	const candidates = [
-		`${platform}-${arch}-metal-fused`,
-		`${platform}-${arch}-vulkan-fused`,
-		`${platform}-${arch}-cuda-fused`,
-		`${platform}-${arch}-cpu-fused`,
-	];
-	return candidates.map((target) => path.join(root, "bin", "mtp", target));
 }

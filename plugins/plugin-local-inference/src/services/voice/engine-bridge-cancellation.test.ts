@@ -164,7 +164,6 @@ describe("EngineVoiceBridge — W3-9 cancellation wiring (production path)", () 
 		const rt = makeFakeRuntime();
 		const bridge = EngineVoiceBridge.start({
 			bundleRoot,
-			useFfiBackend: false,
 			lifecycleLoaders: lifecycleLoadersOk(),
 			runtime: rt,
 		});
@@ -181,7 +180,6 @@ describe("EngineVoiceBridge — W3-9 cancellation wiring (production path)", () 
 	it("exposes null coordinator + policy when runtime is not supplied (back-compat)", () => {
 		const bridge = EngineVoiceBridge.start({
 			bundleRoot,
-			useFfiBackend: false,
 			lifecycleLoaders: lifecycleLoadersOk(),
 		});
 		expect(bridge.cancellationCoordinatorOrNull()).toBeNull();
@@ -192,7 +190,6 @@ describe("EngineVoiceBridge — W3-9 cancellation wiring (production path)", () 
 		const rt = makeFakeRuntime();
 		const bridge = EngineVoiceBridge.start({
 			bundleRoot,
-			useFfiBackend: false,
 			lifecycleLoaders: lifecycleLoadersOk(),
 			runtime: rt,
 		});
@@ -215,7 +212,6 @@ describe("EngineVoiceBridge — W3-9 cancellation wiring (production path)", () 
 		const rt = makeFakeRuntime();
 		const bridge = EngineVoiceBridge.start({
 			bundleRoot,
-			useFfiBackend: false,
 			lifecycleLoaders: lifecycleLoadersOk(),
 			runtime: rt,
 		});
@@ -230,7 +226,6 @@ describe("EngineVoiceBridge — W3-9 cancellation wiring (production path)", () 
 		const rt = makeFakeRuntime();
 		const bridge = EngineVoiceBridge.start({
 			bundleRoot,
-			useFfiBackend: false,
 			lifecycleLoaders: lifecycleLoadersOk(),
 			runtime: rt,
 		});
@@ -264,7 +259,6 @@ describe("EngineVoiceBridge — W3-9 cancellation wiring (production path)", () 
 	it("bindBargeInControllerForRoom is a no-op when runtime is not supplied", () => {
 		const bridge = EngineVoiceBridge.start({
 			bundleRoot,
-			useFfiBackend: false,
 			lifecycleLoaders: lifecycleLoadersOk(),
 		});
 		const unsub = bridge.bindBargeInControllerForRoom("room-X");
@@ -276,7 +270,6 @@ describe("EngineVoiceBridge — W3-9 cancellation wiring (production path)", () 
 		const rt = makeFakeRuntime();
 		const bridge = EngineVoiceBridge.start({
 			bundleRoot,
-			useFfiBackend: false,
 			lifecycleLoaders: lifecycleLoadersOk(),
 			runtime: rt,
 		});
