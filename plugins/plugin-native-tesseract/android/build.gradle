@@ -4,8 +4,6 @@ ext {
     androidxJunitVersion = project.hasProperty('androidxJunitVersion') ? rootProject.ext.androidxJunitVersion : '1.1.5'
     androidxEspressoCoreVersion = project.hasProperty('androidxEspressoCoreVersion') ? rootProject.ext.androidxEspressoCoreVersion : '3.5.1'
     coroutinesVersion = project.hasProperty('coroutinesVersion') ? rootProject.ext.coroutinesVersion : '1.10.2'
-    // Tesseract4Android (adaptech-cz) — native JNI tesseract 5 (Apache-2.0).
-    tesseract4androidVersion = project.hasProperty('tesseract4androidVersion') ? rootProject.ext.tesseract4androidVersion : '4.7.0'
 }
 
 apply plugin: 'com.android.library'
@@ -54,8 +52,12 @@ dependencies {
     implementation project(':capacitor-android')
     implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
     implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:$coroutinesVersion"
-    // The native OCR engine (bundles libtesseract/libleptonica .so for every ABI).
-    implementation "cz.adaptech.tesseract4android:tesseract4android:$tesseract4androidVersion"
+    // Tesseract4Android (adaptech-cz, Apache-2.0) — VENDORED so the build needs no
+    // network/Maven resolution and ships fully offline. classes.jar (TessBaseAPI,
+    // package com.googlecode.tesseract.android) is in libs/ above; the native
+    // engine .so (libtesseract/libleptonica/libjpeg/libpngx) are in
+    // src/main/jniLibs/<abi>/ and auto-bundled by AGP. Re-vendor from
+    // jitpack: com.github.adaptech-cz:Tesseract4Android:tesseract4android:4.8.0.
     testImplementation "junit:junit:$junitVersion"
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
     androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
