@@ -1,7 +1,13 @@
 import type { Plugin } from "@elizaos/core";
-import { logger, promoteSubactionsToActions } from "@elizaos/core";
+import {
+  isAndroidMobile,
+  logger,
+  promoteSubactionsToActions,
+} from "@elizaos/core";
 import { visionAction } from "./action";
 import { wireComputerUseOcrBridge } from "./computeruse-ocr-bridge";
+import { OcrBridgeService } from "./ocr-bridge";
+import { AndroidBridgeOcrService } from "./ocr-service-android-bridge";
 import { LinuxTesseractOcrService } from "./ocr-service-linux-tesseract";
 import { WindowsMediaOcrService } from "./ocr-service-windows";
 import {
@@ -19,7 +25,7 @@ export const visionPlugin: Plugin = {
   name: "vision",
   description:
     "Provides visual perception through camera integration and scene analysis",
-  services: [VisionService, ScreenCaptureBridgeService],
+  services: [VisionService, ScreenCaptureBridgeService, OcrBridgeService],
   providers: [visionProvider],
   routes: visionRoutes,
   actions: [...promoteSubactionsToActions(visionAction)],
@@ -55,10 +61,13 @@ export const visionPlugin: Plugin = {
     // bridge is skipped cleanly when computeruse is not installed).
     if (!getOcrWithCoordsService()) {
       // Prefer the native OS OCR engine where available (zero LLM tokens,
-      // NPU-accelerated): Windows.Media.Ocr on Windows; the classic tesseract
-      // CLI on Linux when installed; otherwise the docTR / Apple-Vision chain.
-      // Native providers can override via registerOcrWithCoordsService later.
-      if (WindowsMediaOcrService.isAvailable()) {
+      // NPU-accelerated): on Android the native Tesseract4Android engine via the
+      // renderer-pulled OCR bridge; Windows.Media.Ocr on Windows; the bundled
+      // tesseract CLI on Linux; otherwise the docTR / Apple-Vision chain. Native
+      // providers can override via registerOcrWithCoordsService later.
+      if (isAndroidMobile() && _runtime) {
+        registerOcrWithCoordsService(new AndroidBridgeOcrService(_runtime));
+      } else if (WindowsMediaOcrService.isAvailable()) {
         registerOcrWithCoordsService(new WindowsMediaOcrService());
       } else if (LinuxTesseractOcrService.isAvailable()) {
         registerOcrWithCoordsService(new LinuxTesseractOcrService());

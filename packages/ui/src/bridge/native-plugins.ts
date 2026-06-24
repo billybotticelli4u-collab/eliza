@@ -871,6 +871,44 @@ export function getScreenCapturePlugin(): ScreenCapturePluginLike {
   return getNativePlugin<ScreenCapturePluginLike>("ScreenCapture");
 }
 
+/** One recognized word from the native Tesseract4Android OCR engine (#9105). */
+export interface TesseractOcrWord {
+  text: string;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  confidence: number;
+  block: number;
+  par: number;
+  line: number;
+}
+
+export interface TesseractRecognizeResultLike {
+  words: TesseractOcrWord[];
+  width: number;
+  height: number;
+  durationMs: number;
+}
+
+export interface TesseractPluginLike extends NativePlugin {
+  isAvailable?: () => Promise<{
+    available: boolean;
+    version?: string;
+    languages?: string[];
+    reason?: string;
+  }>;
+  recognize: (options: {
+    image: string;
+    lang?: string;
+    psm?: number;
+  }) => Promise<TesseractRecognizeResultLike>;
+}
+
+export function getTesseractPlugin(): TesseractPluginLike {
+  return getNativePlugin<TesseractPluginLike>("Tesseract");
+}
+
 export function getCanvasPlugin(): GenericNativePlugin {
   return getNativePlugin<GenericNativePlugin>("Canvas");
 }

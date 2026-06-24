@@ -33,8 +33,9 @@ class TesseractPlugin : Plugin() {
     private const val TAG = "ElizaTesseract"
   }
 
-  /** Copy `assets/tessdata/*.traineddata` into `filesDir/tessdata` once. Returns
-   * the dataPath (the PARENT of `tessdata/`) tesseract init expects. */
+  /** Copy bundled `tessdata` traineddata files from assets into
+   * `filesDir/tessdata` once. Returns the dataPath (the PARENT of the
+   * `tessdata` dir) that tesseract init expects. */
   private fun ensureTessData(): String {
     val ctx = context
     val dest = File(ctx.filesDir, "tessdata")
@@ -170,7 +171,7 @@ class TesseractPlugin : Plugin() {
       call.resolve(result)
     } catch (e: Throwable) {
       Log.e(TAG, "recognize failed", e)
-      call.reject(e.message ?: e.toString(), e)
+      call.reject(e.message ?: e.toString())
     } finally {
       tess?.recycle()
       bitmap?.recycle()
