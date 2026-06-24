@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- On-device OCR needs no runtime permissions; the namespace is in build.gradle. -->
+</manifest>

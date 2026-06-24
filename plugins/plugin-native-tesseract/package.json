@@ -1,0 +1,75 @@
+{
+  "name": "@elizaos/capacitor-tesseract",
+  "version": "0.1.0-beta.0",
+  "description": "On-device Tesseract OCR (text + word boxes + confidence) via native JNI on Android/iOS — zero tokens, offline, for the #9105 vision coord-OCR seam.",
+  "keywords": ["ocr", "tesseract", "vision", "on-device"],
+  "main": "./dist/plugin.cjs.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/esm/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/esm/index.d.ts",
+      "bun": "./src/index.ts",
+      "development": "./src/index.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/plugin.cjs.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "unpkg": "dist/plugin.js",
+  "files": [
+    "android/src/main/",
+    "android/build.gradle",
+    "dist/",
+    "ios/Sources/",
+    "*.podspec",
+    "dist"
+  ],
+  "author": "elizaOS",
+  "license": "MIT",
+  "dependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/elizaOS/eliza"
+  },
+  "scripts": {
+    "build": "node ../../packages/scripts/with-package-build-lock.mjs plugins/plugin-native-tesseract -- bun run build:unlocked",
+    "clean": "node ../../packages/scripts/rm-path-recursive.mjs dist",
+    "test": "vitest run",
+    "prepublishOnly": "bun run build",
+    "watch": "tsc --watch",
+    "build:unlocked": "bun run clean && tsc && bunx rollup -c rollup.config.mjs"
+  },
+  "devDependencies": {
+    "@capacitor/core": "^8.3.1",
+    "@rollup/plugin-node-resolve": "^16.0.0",
+    "rollup": "^4.60.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.0.0"
+  },
+  "peerDependencies": {
+    "@capacitor/core": "^8.3.1"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "capacitor": {
+    "ios": {
+      "src": "ios",
+      "podName": "ElizaCapacitorTesseract"
+    },
+    "android": {
+      "src": "android"
+    }
+  },
+  "elizaos": {
+    "platforms": ["browser", "node"],
+    "runtime": "both",
+    "platformDetails": {
+      "browser": "No native engine; reports unavailable (web uses the docTR/RapidOCR chain)",
+      "node": "No native engine on Node; desktop uses the bundled tesseract CLI provider",
+      "ios": true,
+      "android": true
+    }
+  }
+}

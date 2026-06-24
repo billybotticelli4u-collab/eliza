@@ -1,0 +1,62 @@
+ext {
+    junitVersion = project.hasProperty('junitVersion') ? rootProject.ext.junitVersion : '4.13.2'
+    androidxAppCompatVersion = project.hasProperty('androidxAppCompatVersion') ? rootProject.ext.androidxAppCompatVersion : '1.6.1'
+    androidxJunitVersion = project.hasProperty('androidxJunitVersion') ? rootProject.ext.androidxJunitVersion : '1.1.5'
+    androidxEspressoCoreVersion = project.hasProperty('androidxEspressoCoreVersion') ? rootProject.ext.androidxEspressoCoreVersion : '3.5.1'
+    coroutinesVersion = project.hasProperty('coroutinesVersion') ? rootProject.ext.coroutinesVersion : '1.10.2'
+    // Tesseract4Android (adaptech-cz) — native JNI tesseract 5 (Apache-2.0).
+    tesseract4androidVersion = project.hasProperty('tesseract4androidVersion') ? rootProject.ext.tesseract4androidVersion : '4.7.0'
+}
+
+apply plugin: 'com.android.library'
+// See plugin-native-screencapture: AGP 8.13's "built-in Kotlin" path does not
+// bundle the .class files into the RELEASE library jar, so the Capacitor plugin
+// would be absent from the release dex. Apply the standard Kotlin plugin to wire
+// Kotlin compilation into both debug + release jar-bundling.
+apply plugin: 'org.jetbrains.kotlin.android'
+android {
+    namespace = "ai.eliza.plugins.tesseract"
+    compileSdk project.hasProperty('compileSdkVersion') ? rootProject.ext.compileSdkVersion : 34
+
+    defaultConfig {
+        minSdkVersion project.hasProperty('minSdkVersion') ? rootProject.ext.minSdkVersion : 24
+        targetSdkVersion project.hasProperty('targetSdkVersion') ? rootProject.ext.targetSdkVersion : 34
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
+    }
+
+    kotlinOptions {
+        jvmTarget = "21"
+    }
+}
+
+repositories {
+    google()
+    maven {
+        url = uri(rootProject.ext.has('mavenCentralMirrorUrl') ? rootProject.ext.mavenCentralMirrorUrl : 'https://repo.maven.apache.org/maven2')
+    }
+    mavenCentral()
+}
+
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation project(':capacitor-android')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:$coroutinesVersion"
+    // The native OCR engine (bundles libtesseract/libleptonica .so for every ABI).
+    implementation "cz.adaptech.tesseract4android:tesseract4android:$tesseract4androidVersion"
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+}
