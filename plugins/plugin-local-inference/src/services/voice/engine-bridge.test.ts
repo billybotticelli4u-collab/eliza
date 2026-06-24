@@ -3,7 +3,7 @@
  *
  * Covers:
  *   - `nativeRejectedRangeToRollbackRange` half-open → inclusive conversion;
- *   - `StubOmniVoiceBackend` implementing the streaming seam for scheduler
+ *   - `StubTtsBackend` implementing the streaming seam for scheduler
  *     tests;
  *   - the `EngineVoiceBridge` direct-synthesis guard + one-shot transcription
  *     routing on the non-kokoroOnly (stub/override) path.
@@ -17,12 +17,12 @@ import {
 	EngineVoiceBridge,
 	isStreamingTtsBackend,
 	nativeRejectedRangeToRollbackRange,
-	StubOmniVoiceBackend,
+	StubTtsBackend,
 	type TtsPcmChunk,
 } from "./engine-bridge";
 import type { VoiceLifecycleLoaders } from "./lifecycle";
 import type { MmapRegionHandle, RefCountedResource } from "./shared-resources";
-import type { OmniVoiceBackend, Phrase, SpeakerPreset } from "./types";
+import type { Phrase, SpeakerPreset, TtsBackend } from "./types";
 import { writeVoicePresetFile } from "./voice-preset-format";
 
 function phrase(text: string): Phrase {
@@ -87,9 +87,9 @@ describe("nativeRejectedRangeToRollbackRange", () => {
 	});
 });
 
-describe("StubOmniVoiceBackend — streaming seam", () => {
+describe("StubTtsBackend — streaming seam", () => {
 	it("implements StreamingTtsBackend and emits a fixed number of chunks + final tail", async () => {
-		const backend = new StubOmniVoiceBackend(24_000);
+		const backend = new StubTtsBackend(24_000);
 		expect(isStreamingTtsBackend(backend)).toBe(true);
 		const chunks: TtsPcmChunk[] = [];
 		const res = await backend.synthesizeStream({
@@ -112,7 +112,7 @@ describe("StubOmniVoiceBackend — streaming seam", () => {
 	});
 
 	it("honours a mid-stream cancel via onChunk returning true", async () => {
-		const backend = new StubOmniVoiceBackend(24_000);
+		const backend = new StubTtsBackend(24_000);
 		let n = 0;
 		const res = await backend.synthesizeStream({
 			phrase: phrase("got it"),
@@ -169,7 +169,7 @@ describe("EngineVoiceBridge direct synthesis guard", () => {
 				observedSamples = args.pcm.length;
 				return "Hello, say hello back.";
 			},
-		} as OmniVoiceBackend & {
+		} as TtsBackend & {
 			transcribe(args: {
 				pcm: Float32Array;
 				sampleRate: number;

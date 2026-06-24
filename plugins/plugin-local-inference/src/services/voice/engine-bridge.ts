@@ -14,7 +14,7 @@
  * and barge-in cancellation (mic VAD → drain ring buffer + cancel TTS).
  *
  * The TTS backend on the non-kokoroOnly path is the deterministic
- * `StubOmniVoiceBackend` (or an injected `ttsBackendOverride`); real
+ * `StubTtsBackend` (or an injected `ttsBackendOverride`); real
  * on-device speech is served exclusively through the kokoroOnly path
  * (`KokoroTtsBackend`). The retired `FfiOmniVoiceBackend` (fused OmniVoice
  * TTS) no longer exists.
@@ -96,7 +96,6 @@ import {
 import type {
 	AudioChunk,
 	AudioSink,
-	OmniVoiceBackend,
 	Phrase,
 	RejectedTokenRange,
 	SchedulerConfig,
@@ -104,6 +103,7 @@ import type {
 	StreamingTranscriber,
 	TextToken,
 	TranscriptionAudio,
+	TtsBackend,
 	VadEventSource,
 } from "./types";
 import { decodeMonoPcm16Wav, encodeMonoPcm16Wav } from "./wav-codec";
@@ -166,7 +166,7 @@ export interface TtsPcmChunk {
  * in-flight forward pass at the next kernel boundary (barge-in /
  * MTP-rejected tail).
  *
- * `StubOmniVoiceBackend` satisfies it by emitting deterministic synthetic
+ * `StubTtsBackend` satisfies it by emitting deterministic synthetic
  * PCM split into a fixed number of chunks so scheduler tests can observe
  * the incremental handoff without a real model. The live on-device path is
  * `KokoroTtsBackend` (kokoroOnly).
@@ -191,8 +191,8 @@ export interface StreamingTtsBackend {
 
 /** True when `backend` implements the `StreamingTtsBackend` seam. */
 export function isStreamingTtsBackend(
-	backend: OmniVoiceBackend,
-): backend is OmniVoiceBackend & StreamingTtsBackend {
+	backend: TtsBackend,
+): backend is TtsBackend & StreamingTtsBackend {
 	return (
 		typeof (backend as Partial<StreamingTtsBackend>).synthesizeStream ===
 		"function"
@@ -205,9 +205,7 @@ export function isStreamingTtsBackend(
  * cancel signal honoured at the kernel-tick boundary so barge-in tests
  * observe cancellation without waiting on a real model.
  */
-export class StubOmniVoiceBackend
-	implements OmniVoiceBackend, StreamingTtsBackend
-{
+export class StubTtsBackend implements TtsBackend, StreamingTtsBackend {
 	readonly id = "stub" as const;
 	private readonly sampleRate: number;
 	calls = 0;
@@ -311,17 +309,17 @@ export interface EngineVoiceBridgeOptions {
 	events?: SchedulerEvents;
 	/**
 	 * Optional override for the TTS backend. Supersedes the default
-	 * `StubOmniVoiceBackend` on the non-kokoroOnly path. Tests use this to
+	 * `StubTtsBackend` on the non-kokoroOnly path. Tests use this to
 	 * inject a controllable backend (e.g. one that holds synthesis open until
 	 * a deferred resolves) so rollback timing can be observed deterministically.
 	 */
-	backendOverride?: OmniVoiceBackend;
+	backendOverride?: TtsBackend;
 	/**
 	 * Override only the TTS backend on the non-kokoroOnly path. Used by tests
 	 * that want a specific backend while keeping the default bundle/ASR
 	 * scaffolding.
 	 */
-	ttsBackendOverride?: OmniVoiceBackend;
+	ttsBackendOverride?: TtsBackend;
 	/** Optional speaker preset paired with `ttsBackendOverride`. */
 	speakerPresetOverride?: SpeakerPreset;
 	/**
@@ -607,7 +605,7 @@ function buildCancellationWiring(
  */
 export class EngineVoiceBridge {
 	readonly scheduler: VoiceScheduler;
-	readonly backend: OmniVoiceBackend;
+	readonly backend: TtsBackend;
 	readonly lifecycle: VoiceLifecycle;
 	/** Loaded FFI handle when running against the fused build (else null). */
 	readonly ffi: ElizaInferenceFfi | null;
@@ -664,7 +662,7 @@ export class EngineVoiceBridge {
 
 	private constructor(
 		scheduler: VoiceScheduler,
-		backend: OmniVoiceBackend,
+		backend: TtsBackend,
 		bundleRoot: string,
 		lifecycle: VoiceLifecycle,
 		ffi: ElizaInferenceFfi | null,
@@ -782,11 +780,11 @@ export class EngineVoiceBridge {
 		// The non-kokoroOnly path never sources a fused FFI handle: real
 		// on-device speech is served exclusively through the kokoroOnly path
 		// (`KokoroTtsBackend`). This path uses the deterministic
-		// `StubOmniVoiceBackend` (or an injected `backendOverride` /
+		// `StubTtsBackend` (or an injected `backendOverride` /
 		// `ttsBackendOverride`) so `ffiHandle`/`ffiContextRef` stay null.
 		const ffiHandle: ElizaInferenceFfi | null = null;
 		const ffiContextRef: FfiContextRef | null = null;
-		let backend: OmniVoiceBackend;
+		let backend: TtsBackend;
 		const asrAvailable = bundleHasRegularFile(
 			path.join(opts.bundleRoot, "asr"),
 		);
@@ -799,7 +797,7 @@ export class EngineVoiceBridge {
 		if (opts.backendOverride) {
 			backend = opts.backendOverride;
 		} else {
-			backend = opts.ttsBackendOverride ?? new StubOmniVoiceBackend(sampleRate);
+			backend = opts.ttsBackendOverride ?? new StubTtsBackend(sampleRate);
 		}
 
 		const config: SchedulerConfig = {
@@ -975,12 +973,12 @@ export class EngineVoiceBridge {
 
 	/**
 	 * True when this bridge runs against a TTS backend that produces real
-	 * audio — i.e. anything but the `StubOmniVoiceBackend` (which yields
+	 * audio — i.e. anything but the `StubTtsBackend` (which yields
 	 * zeros and is tests-only). The prewarm + first-audio-filler paths gate
 	 * on this so the cache never holds silence (AGENTS.md §3 — no fake data).
 	 */
 	hasRealTtsBackend(): boolean {
-		return !(this.backend instanceof StubOmniVoiceBackend);
+		return !(this.backend instanceof StubTtsBackend);
 	}
 
 	/**
@@ -1136,7 +1134,7 @@ export class EngineVoiceBridge {
 	/**
 	 * The streaming-TTS seam W9's scheduler drives: returns the active
 	 * backend as a `StreamingTtsBackend` (`KokoroTtsBackend` on the live
-	 * kokoroOnly path, `StubOmniVoiceBackend` for tests). The scheduler calls
+	 * kokoroOnly path, `StubTtsBackend` for tests). The scheduler calls
 	 * `synthesizeStream(...)` for each phrase and writes the delivered PCM
 	 * segments into its `PcmRingBuffer` on the same scheduler tick. Returns
 	 * null when an injected `backendOverride` does not implement the seam.
@@ -1304,7 +1302,7 @@ export class EngineVoiceBridge {
 				? signal.reason
 				: new DOMException("Aborted", "AbortError");
 		}
-		const backendTimed = this.backend as OmniVoiceBackend & {
+		const backendTimed = this.backend as TtsBackend & {
 			transcribeTimed?: (
 				args: TranscriptionAudio,
 			) => Promise<{ text: string; words: AsrWordTiming[] }>;
@@ -1357,7 +1355,7 @@ export class EngineVoiceBridge {
 				? signal.reason
 				: new DOMException("Aborted", "AbortError");
 		}
-		const backendBatch = this.backend as OmniVoiceBackend & {
+		const backendBatch = this.backend as TtsBackend & {
 			transcribe?: (args: TranscriptionAudio) => Promise<string>;
 		};
 		if (typeof backendBatch.transcribe === "function") {

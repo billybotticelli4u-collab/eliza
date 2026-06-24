@@ -1,7 +1,7 @@
 /**
  * Kokoro-82M TTS backend.
  *
- * Implements the `OmniVoiceBackend + StreamingTtsBackend` seam (the same
+ * Implements the `TtsBackend + StreamingTtsBackend` seam (the same
  * seam the retired fused OmniVoice TTS backend satisfied), so a
  * `VoiceScheduler` instance does not need to know which TTS family it is
  * driving. Kokoro is now the only on-device TTS backend.
@@ -18,10 +18,10 @@
 
 import type {
 	AudioChunk,
-	OmniVoiceBackend,
 	Phrase,
 	SpeakerPreset,
 	StreamingTtsBackend,
+	TtsBackend,
 	TtsPcmChunk,
 } from "../types";
 import type { KokoroRuntime } from "./kokoro-runtime";
@@ -60,7 +60,7 @@ export const KOKORO_MOBILE_TTFA_BUDGET_MS = 700;
  * the full waveform in one forward, but we surface it as one body chunk +
  * tail so the scheduler protocol is identical for both backends.
  */
-export class KokoroTtsBackend implements OmniVoiceBackend, StreamingTtsBackend {
+export class KokoroTtsBackend implements TtsBackend, StreamingTtsBackend {
 	readonly id = "kokoro" as const;
 	private readonly runtime: KokoroRuntime;
 	private readonly defaultVoiceId: string;

@@ -85,7 +85,7 @@ export {
 	EngineVoiceBridge,
 	type EngineVoiceBridgeOptions,
 	encodeMonoPcm16Wav,
-	StubOmniVoiceBackend,
+	StubTtsBackend,
 	type VoiceTurnEvents,
 } from "./engine-bridge";
 export {
