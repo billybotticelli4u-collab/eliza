@@ -1,0 +1,124 @@
+name: Kokoro real-weight smoke (Linux)
+
+# Builds the fused `libelizainference.so` with Kokoro folded in
+# (LLAMA_BUILD_KOKORO=ON), stages the published Kokoro bundle GGUF + a voice
+# pack, and runs `scripts/kokoro-real-smoke.ts` against them. This is the gate
+# that keeps the fused-lib loader and the published GGUF from drifting apart on
+# tensor names (issue #9588): the loader must load the SAME GGUF the download
+# path stages, or this job goes RED.
+#
+# The smoke runs with KOKORO_SMOKE_REQUIRE=1 so a missing/un-loadable lib or
+# model is a hard failure (exit 1), never a silent skip.
+#
+# Opt-in: triggered manually, on a tag, or when the loader / converter / smoke
+# changes land. It is NOT in the default PR fan-out (it downloads a model and
+# builds native code). To run locally, see the staging steps documented in
+# `plugins/plugin-local-inference/README.md`.
+
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - "kokoro-smoke-*"
+    paths:
+      - "plugins/plugin-local-inference/native/llama.cpp/tools/kokoro/**"
+      - "plugins/plugin-local-inference/scripts/kokoro-real-smoke.ts"
+      - ".github/workflows/kokoro-real-smoke.yml"
+
+concurrency:
+  group: kokoro-real-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "24"
+  BUN_VERSION: "canary"
+  # Published Kokoro bundle (mainline-named GGUF, the #9588 repro file).
+  KOKORO_HF_REPO: "elizaos/eliza-1"
+  KOKORO_GGUF_PATH: "bundles/2b/tts/kokoro/kokoro-82m-v1_0-Q4_K_M.gguf"
+  # Catalog default voice (Samantha). The smoke also accepts any staged voice.
+  KOKORO_VOICE_PATH: "bundles/2b/tts/kokoro/voices/af_same.bin"
+
+jobs:
+  smoke:
+    name: ubuntu-22.04 fused-cpu
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout (with llama.cpp submodule)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          submodules: recursive
+          show-progress: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install Linux build deps
+        run: |
+          set -euo pipefail
+          APT_ARGS=(-o Acquire::ForceIPv4=true -o Acquire::Retries=5 -o Acquire::http::Timeout=30)
+          for attempt in 1 2 3; do
+            if sudo apt-get "${APT_ARGS[@]}" update && \
+               sudo apt-get "${APT_ARGS[@]}" install -y --fix-missing \
+                 cmake ninja-build build-essential ccache git python3 curl; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then echo "apt install failed"; exit 1; fi
+            sleep $((attempt * 10))
+          done
+          cmake --version
+
+      - name: Configure fused libelizainference (CPU, Kokoro ON)
+        run: |
+          set -euo pipefail
+          cmake -S plugins/plugin-local-inference/native/llama.cpp \
+                -B plugins/plugin-local-inference/native/llama.cpp/build-static-fused \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DBUILD_SHARED_LIBS=OFF \
+                -DLLAMA_BUILD_KOKORO=ON \
+                -DLLAMA_BUILD_OMNIVOICE=ON \
+                -DOMNIVOICE_SHARED=ON \
+                -DGGML_NATIVE=OFF \
+                -DGGML_OPENMP=ON
+
+      - name: Build elizainference (fused, links Kokoro)
+        run: |
+          set -euo pipefail
+          ninja -C plugins/plugin-local-inference/native/llama.cpp/build-static-fused elizainference
+          LIB=plugins/plugin-local-inference/native/llama.cpp/build-static-fused/bin/libelizainference.so
+          test -f "$LIB" || { echo "missing $LIB"; exit 1; }
+          nm -D "$LIB" | grep -q eliza_inference_kokoro_load || {
+            echo "fused lib does not export the Kokoro ABI"; exit 1; }
+          file "$LIB"
+
+      - name: Stage published Kokoro bundle GGUF + voice
+        run: |
+          set -euo pipefail
+          DIR="$HOME/.local/state/milady/local-inference/models/kokoro"
+          mkdir -p "$DIR/voices"
+          base="https://huggingface.co/${KOKORO_HF_REPO}/resolve/main"
+          curl -fSL --retry 5 -o "$DIR/$(basename "$KOKORO_GGUF_PATH")" \
+            "$base/${KOKORO_GGUF_PATH}?download=true"
+          curl -fSL --retry 5 -o "$DIR/voices/$(basename "$KOKORO_VOICE_PATH")" \
+            "$base/${KOKORO_VOICE_PATH}?download=true"
+          ls -lh "$DIR" "$DIR/voices"
+
+      - name: Run real-weight Kokoro smoke (require-staged)
+        env:
+          KOKORO_SMOKE_REQUIRE: "1"
+          ELIZA_INFERENCE_LIB_DIR: ${{ github.workspace }}/plugins/plugin-local-inference/native/llama.cpp/build-static-fused/bin
+        run: |
+          set -euo pipefail
+          export ELIZA_KOKORO_MODEL_DIR="$HOME/.local/state/milady/local-inference/models/kokoro"
+          bun plugins/plugin-local-inference/scripts/kokoro-real-smoke.ts

@@ -15,11 +15,20 @@
  * developer box without them is skipped; a CI lane that staged them then
  * produced bad/slow audio goes RED).
  *
+ * Set `KOKORO_SMOKE_REQUIRE=1` to turn every skip into a hard failure (exit 1).
+ * A CI lane that builds the fused lib and stages the GGUF MUST set this so a
+ * regression that makes the lib/model un-loadable (e.g. the tensor-name
+ * mismatch in #9588) goes RED instead of silently exiting 2. See
+ * `.github/workflows/kokoro-real-smoke.yml` and the staging steps documented
+ * in `plugins/plugin-local-inference/README.md`.
+ *
  * Inputs (env):
  *   ELIZA_INFERENCE_LIBRARY / ELIZA_INFERENCE_LIB_DIR — fused lib (else the
  *     <stateDir>/local-inference/lib default from `build:fused-desktop`).
  *   ELIZA_KOKORO_MODEL_DIR — a dir with kokoro-82m-v1_0*.gguf + voices/<v>.bin
  *     (else <stateDir>/local-inference/models/kokoro).
+ *   KOKORO_SMOKE_REQUIRE — when truthy, a missing lib/model/ABI is a hard
+ *     failure (exit 1) rather than a skip (exit 2).
  */
 
 import { resolveFusedLibraryPath } from "../src/services/desktop-fused-ffi-backend-runtime";
@@ -32,7 +41,18 @@ import { KOKORO_MOBILE_TTFA_BUDGET_MS } from "../src/services/voice/kokoro/kokor
 import { resolveKokoroEngineConfig } from "../src/services/voice/kokoro/kokoro-engine-discovery";
 import type { Phrase } from "../src/services/voice/types";
 
+const requireStaged = (() => {
+	const v = process.env.KOKORO_SMOKE_REQUIRE;
+	return !!v && v !== "0" && v.toLowerCase() !== "false";
+})();
+
 function skip(msg: string): never {
+	if (requireStaged) {
+		console.error(
+			`[kokoro-real-smoke] FAIL (KOKORO_SMOKE_REQUIRE set): ${msg}`,
+		);
+		process.exit(1);
+	}
 	console.log(`[kokoro-real-smoke] SKIP: ${msg}`);
 	process.exit(2);
 }

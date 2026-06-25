@@ -155,4 +155,46 @@ benches, and the single-turn headful self-test (`voice-selftest`). Those remain
 runnable, but **new** voice coverage should be authored as a `VoiceScenario` +
 corpus and scored through `e2e-harness.ts`, not as a new bespoke harness.
 
+## Real-weight Kokoro smoke (loader ↔ GGUF drift gate)
+
+`scripts/kokoro-real-smoke.ts` (npm script `test:kokoro:real`) loads the fused
+`libelizainference` and the **published** Kokoro bundle GGUF, synthesizes a
+phrase, and asserts non-empty 24 kHz PCM inside the mobile TTFA budget. It is
+the gate that keeps the fused-lib loader and the shipped GGUF from drifting on
+tensor names (issue #9588): the loader accepts both the canonical CrispASR
+`bert.*` naming and the published bundle's mainline `kokoro.bert.layer.*` naming
+(normalized in `tools/kokoro/src/kokoro-crispasr.cpp::canonicalize_tensor_name`),
+so the same forward-pass code loads either.
+
+Stage the model and run it locally:
+
+```bash
+# 1. Build the fused lib with Kokoro folded in (LLAMA_BUILD_KOKORO=ON):
+cd plugins/plugin-local-inference/native/llama.cpp
+cmake -S . -B build-static-fused -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DLLAMA_BUILD_KOKORO=ON -DLLAMA_BUILD_OMNIVOICE=ON -DOMNIVOICE_SHARED=ON
+ninja -C build-static-fused elizainference
+
+# 2. Stage the published bundle GGUF + a voice pack:
+DIR="$HOME/.local/state/milady/local-inference/models/kokoro"; mkdir -p "$DIR/voices"
+base="https://huggingface.co/elizaos/eliza-1/resolve/main/bundles/2b/tts/kokoro"
+curl -fSL "$base/kokoro-82m-v1_0-Q4_K_M.gguf?download=true" -o "$DIR/kokoro-82m-v1_0-Q4_K_M.gguf"
+curl -fSL "$base/voices/af_heart.bin?download=true"          -o "$DIR/voices/af_heart.bin"
+
+# 3. Run the smoke. KOKORO_SMOKE_REQUIRE=1 turns a missing lib/model/ABI into a
+#    hard failure instead of a skip, so the lane can't silently pass:
+KOKORO_SMOKE_REQUIRE=1 \
+  ELIZA_INFERENCE_LIB_DIR="$PWD/build-static-fused/bin" \
+  ELIZA_KOKORO_MODEL_DIR="$DIR" \
+  bun ../../scripts/kokoro-real-smoke.ts
+```
+
+CI: `.github/workflows/kokoro-real-smoke.yml` runs steps 1–3 with
+`KOKORO_SMOKE_REQUIRE=1` on demand, on a `kokoro-smoke-*` tag, and when the
+Kokoro loader or smoke changes. The published bundle GGUF must be a complete
+model (~459 tensors); the converter's `--stub` output (97 tensors, no embedding
+/ decoder / generator) loads its BERT+predictor weights but cannot synthesize
+and the smoke fails loudly on the absent `text_enc.embd.weight` /
+`dec.gen.conv_post.weight`.
+
 For agent-facing documentation see `CLAUDE.md` / `AGENTS.md` in this directory.
